@@ -108,6 +108,53 @@ func main() {
 
 `nodelease` 不会关闭传入的 Redis 客户端；客户端生命周期由调用方管理。
 
+## 自动续租与生命周期
+
+续租由 `Acquire` 成功后启动的后台 goroutine 驱动，不依赖业务访问，也不会因为调用 `WorkerID()` 而续租。生命周期内部使用可停止的 `time.Timer`，而不是固定运行的 `time.Ticker`。
+
+```text
+Acquire
+   |
+   +-- SET key token NX PX ttl
+   |
+   +-- 启动生命周期 goroutine
+          |
+          +-- Timer 等待 min(RenewInterval, TTL 剩余时间)
+          |
+          +-- 到达续租时间 -> Lua 校验 token -> PEXPIRE
+          |                         |
+          |                         +-- 成功：重置本地截止时间并创建下一轮 Timer
+          |                         +-- token 不匹配：立即报告 ErrLeaseLost
+          |                         +-- Redis 暂时错误：在 TTL 截止前继续尝试
+          |
+          +-- Release：取消 Timer，等待后台退出，再按 token 删除 key
+```
+
+默认 `TTL` 为 30 秒，默认 `RenewInterval` 为 10 秒。每轮都根据最新截止时间重新计算 Timer，因此：
+
+- `Renew(ctx)` 手动续租成功后，会唤醒后台循环并按新的截止时间重新计时。
+- 自动续租遇到暂时 Redis 错误时，不会立即宣布丢失；只要仍在已确认 TTL 内，就会继续尝试。
+- token 不匹配或 key 已不存在，说明所有权已明确丢失，会立即发送 `ErrLeaseLost`。
+- 无法在已确认 TTL 到期前完成续租，会发送包含 `ErrLeaseLost` 的错误。
+- `DisableRenew: true` 只关闭 Redis 自动续租；后台 Timer 仍会跟踪本地截止时间，并在到期后报告租约丢失。
+
+`Acquire` 使用的 context 只控制申请过程。申请成功后，内部生命周期不会因为该 context 随后取消而停止；应使用 `Release` 明确结束租约。
+
+### Lease 状态
+
+```text
+未申请 -> 申请中 -> 持有中 -> 释放中 -> 已释放
+                     |
+                     +-> 已丢失
+```
+
+- `Lease` 可安全并发使用。
+- 并发 `Acquire` 会等待正在进行的申请；成功后所有调用返回同一个 ID。
+- 申请失败时，同一个 `Lease` 可以再次调用 `Acquire`。
+- 一旦成功持有过 ID，释放或丢失就是终态；需要再次申请时必须调用 `New`。
+- `Release` 会先阻止后续续租，再等待当前续租退出，避免删除后又被旧循环续期。
+- Redis 网络调用期间不会持有内部状态锁；返回后会校验租约代次，避免过期结果覆盖新状态。
+
 ## API
 
 ### `New(config Config) (*Lease, error)`
@@ -151,10 +198,13 @@ type Config struct {
 - 范围已满时返回 `ErrNoWorkerIDAvailable`。
 - Redis 或 context 错误保留原始原因。
 - 申请成功后，`Acquire` 的 context 取消不会终止租约；租约由 `Release`、丢失或 TTL 控制。
+- 申请尚未成功时发生错误，可以使用同一个 `Lease` 重试。
 
 ### `(*Lease).Renew(ctx context.Context) error`
 
 手动将当前租约延长一个完整 TTL。Lua 脚本会先校验所有权令牌。key 不存在或令牌不匹配时返回 `ErrLeaseLost`。
+
+手动续租与自动续租可以并发执行。成功后，本地截止时间更新为“当前时间 + TTL”，并通知生命周期 Timer 重新计算等待时间。
 
 ### `(*Lease).Release(ctx context.Context) error`
 
@@ -209,6 +259,25 @@ nodelease:{b3JkZXItc2VydmljZQ}:worker:37
 
 花括号形成 Redis Cluster hash tag。同一服务的 key 会进入同一 slot，服务名使用无填充 Base64 URL 编码避免分隔符冲突。
 
+在 Redis Cluster 中可以直接传入 `redis.ClusterClient`，它实现了 `redis.UniversalClient`：
+
+```go
+rdb := redis.NewClusterClient(&redis.ClusterOptions{
+	Addrs: []string{
+		"redis-1:6379",
+		"redis-2:6379",
+		"redis-3:6379",
+	},
+})
+
+lease, err := nodelease.New(nodelease.Config{
+	ServiceName: "order-service",
+	Redis:       rdb,
+})
+```
+
+同一服务的不同 worker ID 拥有相同 hash tag，因此会映射到相同 slot；不同服务通常映射到不同 slot。当前所有 Redis 命令和 Lua 脚本都只操作一个 key，不存在跨 slot 多 key 操作。
+
 - 申请：`SET key token NX PX ttl`
 - 续租：Lua 原子比较 token 后执行 `PEXPIRE`
 - 释放：Lua 原子比较 token 后执行 `DEL`
@@ -219,6 +288,7 @@ nodelease:{b3JkZXItc2VydmljZQ}:worker:37
 
 - 唯一性建立在目标 Redis 对成功写入的保持能力上。
 - 网络超时可能导致申请结果不确定；这类未续租 key 会在 TTL 后自动回收。
+- Redis TTL 使用毫秒精度；不足整毫秒的部分会被截断，配置的 TTL 因此不得小于 `1ms`。
 - Redis 数据丢失、异步复制或故障转移可能使租约状态回退。严格唯一性场景需同时配置合适的 Redis 持久化与高可用策略。
 - 长时间 GC/调度暂停和网络分区可能导致租约丢失。调用方必须监听 `Lost()`，并在丢失后停止使用旧 ID。
 - 相同 `ServiceName` 的所有实例应使用一致的范围、namespace 和租约策略。
