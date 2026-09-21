@@ -1,0 +1,38 @@
+{
+    // 指定当前项目使用的 Go 安装根目录 (GOROOT)
+    // 当你需要为不同项目使用不同 Go 版本时，这个设置非常有用
+    "go.goroot": "C:/Users/cd/sdk/go1.26.1",
+    // 指定当前项目的 Go 工作区目录 (GOPATH)
+    "go.gopath": "C:\\Users\\cd\\go",
+    // 配置 Go 工具运行时所需的环境变量
+    // 这是设置 GOPROXY、GO111MODULE 等变量的推荐位置
+    "go.toolsEnvVars": {
+        "GOPROXY": "https://goproxy.cn,direct",
+        "GO111MODULE": "on",
+        "GOPRIVATE": "git.example.com"
+    },
+    // 指定 Go 工具（如 gopls, dlv）的安装目录
+    // 启用语言服务器 gopls，这是代码补全、跳转等功能的核心
+    "go.useLanguageServer": true,
+    // 保存时自动格式化代码
+    "editor.formatOnSave": true,
+    // 配置代码格式化工具，推荐使用 goimports
+    "go.formatTool": "goimports",
+    "terminal.integrated.env.windows": {
+        "PATH": "C:\\Users\\cd\\sdk\\go1.26.1\\bin;C:\\Users\\cd\\go\\bin;${env:PATH}"
+    },
+    // 设置主题和默认终端
+    "python.analysis.typeCheckingMode": "strict",
+    "workbench.colorTheme": "Dark+",
+    "editor.fontSize": 14,
+    "terminal.integrated.defaultProfile.windows": "Git Bash",
+    "terminal.integrated.profiles.windows": {
+        "Git Bash": {
+            "path": "C:\\Program Files\\Git\\bin\\bash.exe",
+            "args": [
+                "--login",
+                "-i"
+            ]
+        }
+    }
+}
