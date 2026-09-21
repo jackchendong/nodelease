@@ -8,6 +8,8 @@
 
 > 当前仓库处于初始阶段。本文档定义建议的公开 API 和行为约定，后续实现应以此为契约。
 
+仓库地址：[github.com/jackchendong/nodelease](https://github.com/jackchendong/nodelease)
+
 ## 特性
 
 - 同一服务的在线实例不会获得重复 ID
@@ -22,22 +24,16 @@
 Go 库不需要发布到单独的包注册平台。代码推送到 Git 仓库后即可直接安装：
 
 ```bash
-go get <module-path>@latest
-```
-
-例如，仓库地址为 `github.com/acme/nodelease` 时：
-
-```bash
-go get github.com/acme/nodelease@latest
+go get github.com/jackchendong/nodelease@latest
 ```
 
 然后导入：
 
 ```go
-import "github.com/acme/nodelease"
+import "github.com/jackchendong/nodelease"
 ```
 
-`<module-path>` 必须与 `go.mod` 第一行声明的地址一致。
+项目的 `go.mod` 模块地址应声明为 `github.com/jackchendong/nodelease`。
 
 私有仓库需要配置 `GOPRIVATE`，并通过 SSH key、credential helper 或访问令牌完成 Git 认证：
 
@@ -49,7 +45,7 @@ go get git.example.com/your-team/nodelease@latest
 本地开发可以在调用方的 `go.mod` 中临时替换模块路径：
 
 ```go
-replace example.com/your-team/nodelease => ../nodelease
+replace github.com/jackchendong/nodelease => ../nodelease
 ```
 
 ## 快速开始
@@ -69,7 +65,7 @@ import (
 	"time"
 
 	"github.com/redis/go-redis/v9"
-	"<module-path>"
+	"github.com/jackchendong/nodelease"
 )
 
 func main() {
@@ -208,10 +204,10 @@ nodelease:{order-service}:worker:37
 ```bash
 git tag v0.1.0
 git push origin v0.1.0
-go get <module-path>@v0.1.0
+go get github.com/jackchendong/nodelease@v0.1.0
 ```
 
-稳定 API 通常从 `v1.0.0` 开始。`v2` 及以上需要在模块路径末尾添加主版本，例如 `example.com/team/nodelease/v2`。
+稳定 API 通常从 `v1.0.0` 开始。`v2` 及以上需要在模块路径末尾添加主版本，例如 `github.com/jackchendong/nodelease/v2`。
 
 ## 运维建议
 

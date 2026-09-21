@@ -8,6 +8,8 @@ It is designed for Snowflake ID generators, distributed workers, and other syste
 
 > This repository is at an initial stage. This document defines the proposed public API and behavior contract.
 
+Repository: [github.com/jackchendong/nodelease](https://github.com/jackchendong/nodelease)
+
 ## Features
 
 - Prevents active instances of one service from sharing an ID
@@ -22,22 +24,16 @@ It is designed for Snowflake ID generators, distributed workers, and other syste
 A Go library does not need a separate package registry. Once the code is in a Git repository, install it directly:
 
 ```bash
-go get <module-path>@latest
-```
-
-For a repository at `github.com/acme/nodelease`:
-
-```bash
-go get github.com/acme/nodelease@latest
+go get github.com/jackchendong/nodelease@latest
 ```
 
 Then import it:
 
 ```go
-import "github.com/acme/nodelease"
+import "github.com/jackchendong/nodelease"
 ```
 
-`<module-path>` must match the module path on the first line of `go.mod`.
+The module path in this project's `go.mod` should be `github.com/jackchendong/nodelease`.
 
 For a private repository, configure `GOPRIVATE` and authenticate Git using an SSH key, credential helper, or access token:
 
@@ -49,7 +45,7 @@ go get git.example.com/your-team/nodelease@latest
 For local development, add a temporary replacement to the consumer's `go.mod`:
 
 ```go
-replace example.com/your-team/nodelease => ../nodelease
+replace github.com/jackchendong/nodelease => ../nodelease
 ```
 
 ## Quick start
@@ -69,7 +65,7 @@ import (
 	"time"
 
 	"github.com/redis/go-redis/v9"
-	"<module-path>"
+	"github.com/jackchendong/nodelease"
 )
 
 func main() {
@@ -208,10 +204,10 @@ No package-registry upload is required. Create a semantic-version Git tag:
 ```bash
 git tag v0.1.0
 git push origin v0.1.0
-go get <module-path>@v0.1.0
+go get github.com/jackchendong/nodelease@v0.1.0
 ```
 
-A stable API conventionally starts at `v1.0.0`. Major versions `v2` and later require a module-path suffix, such as `example.com/team/nodelease/v2`.
+A stable API conventionally starts at `v1.0.0`. Major versions `v2` and later require a module-path suffix, such as `github.com/jackchendong/nodelease/v2`.
 
 ## Operational guidance
 
