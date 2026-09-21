@@ -1,2 +1,23 @@
 # Local editor settings
 .vscode/
+
+# Local environment and secrets
+.env
+.env.*
+!.env.example
+
+# Go build and test artifacts
+bin/
+dist/
+*.exe
+*.test
+*.out
+coverage.*
+cpu.prof
+mem.prof
+trace.out
+
+# Temporary files
+.tmp/
+tmp/
+*.log

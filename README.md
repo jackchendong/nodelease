@@ -1,27 +1,37 @@
 # nodelease
 
-[English](README.en.md) | 简体中文
+简体中文 | [English](README.en.md)
 
-`nodelease` 是一个基于 Redis 的 Go `worker_id` 租约库。使用者只需提供服务名和 Redis 客户端，即可从指定范围内随机获取一个当前未被占用的 ID。库会自动续租，并在进程退出或停止续租后自动回收 ID。
+`nodelease` 是一个基于 Redis 的 Go `worker_id` 租约库。调用方提供服务名和 Redis 客户端，库会从指定范围内随机开始查找并原子申请一个可用 ID，通过自动续租维持所有权，并在停止续租后由 Redis 自动回收。
 
-适用于 Snowflake ID 生成器、分布式任务执行器，以及其他需要为运行实例分配短整数标识的场景。
-
-> 当前仓库处于初始阶段。本文档定义建议的公开 API 和行为约定，后续实现应以此为契约。
-
-仓库地址：[github.com/jackchendong/nodelease](https://github.com/jackchendong/nodelease)
+适用于 Snowflake ID 生成器、分布式任务执行器，以及其他需要为每个运行实例分配短整数标识的场景。
 
 ## 特性
 
-- 同一服务的在线实例不会获得重复 ID
+- 同一服务的在线实例不会获得重复的 `worker_id`
 - 使用服务名隔离不同应用的 ID 空间
-- 支持自定义 ID 范围和随机分配
+- 支持包含两端的自定义 ID 范围，默认 `[0, 1023]`
+- 使用加密随机起点和有界完整遍历，既分散竞争又能可靠判断耗尽
 - 支持自动续租、手动续租和主动释放
-- 租约到期后自动回收 ID
-- 支持 `context.Context`
+- 使用随机所有权令牌，旧实例不能续租或删除新持有者的租约
+- Redis Cluster 友好的 hash tag key
+- 并发安全，支持 `context.Context`
+
+## 环境要求
+
+- Go 1.21 或更高版本
+- Redis 6.0 或更高版本
+- [`github.com/redis/go-redis/v9`](https://github.com/redis/go-redis)
 
 ## 安装
 
-Go 库不需要发布到单独的包注册平台。代码推送到 Git 仓库后即可直接安装：
+直接通过 Go Modules 从 GitHub 安装稳定版本，无需单独的包注册平台：
+
+```bash
+go get github.com/jackchendong/nodelease@v0.1.0
+```
+
+如需跟随最新提交，可使用：
 
 ```bash
 go get github.com/jackchendong/nodelease@latest
@@ -33,24 +43,7 @@ go get github.com/jackchendong/nodelease@latest
 import "github.com/jackchendong/nodelease"
 ```
 
-项目的 `go.mod` 模块地址应声明为 `github.com/jackchendong/nodelease`。
-
-私有仓库需要配置 `GOPRIVATE`，并通过 SSH key、credential helper 或访问令牌完成 Git 认证：
-
-```bash
-go env -w GOPRIVATE=git.example.com/your-team/*
-go get git.example.com/your-team/nodelease@latest
-```
-
-本地开发可以在调用方的 `go.mod` 中临时替换模块路径：
-
-```go
-replace github.com/jackchendong/nodelease => ../nodelease
-```
-
 ## 快速开始
-
-下面以 [`github.com/redis/go-redis/v9`](https://github.com/redis/go-redis) 为例：
 
 ```go
 package main
@@ -64,8 +57,8 @@ import (
 	"syscall"
 	"time"
 
-	"github.com/redis/go-redis/v9"
 	"github.com/jackchendong/nodelease"
+	"github.com/redis/go-redis/v9"
 )
 
 func main() {
@@ -76,10 +69,12 @@ func main() {
 	defer rdb.Close()
 
 	lease, err := nodelease.New(nodelease.Config{
-		ServiceName:   "order-service",
-		Redis:         rdb,
-		MinWorkerID:   0,
-		MaxWorkerID:   1023,
+		ServiceName: "order-service",
+		Redis:       rdb,
+		Range: &nodelease.IDRange{
+			Min: 0,
+			Max: 1023,
+		},
 		TTL:           30 * time.Second,
 		RenewInterval: 10 * time.Second,
 	})
@@ -93,10 +88,12 @@ func main() {
 	}
 	log.Printf("worker_id: %d", workerID)
 
+	// 将 workerID 传给 Snowflake 或其他需要实例标识的组件。
+
 	select {
 	case <-ctx.Done():
 	case err := <-lease.Lost():
-		if !errors.Is(err, context.Canceled) {
+		if errors.Is(err, nodelease.ErrLeaseLost) {
 			log.Printf("worker_id lease lost: %v", err)
 		}
 	}
@@ -109,114 +106,132 @@ func main() {
 }
 ```
 
+`nodelease` 不会关闭传入的 Redis 客户端；客户端生命周期由调用方管理。
+
 ## API
 
 ### `New(config Config) (*Lease, error)`
 
-创建租约并校验配置。`New` 不访问 Redis；调用 `Acquire` 后才申请 ID。
+创建单次生命周期的租约对象并校验配置。`New` 不访问 Redis，调用 `Acquire` 时才申请 ID。
 
 ```go
+type IDRange struct {
+	Min int64
+	Max int64
+}
+
 type Config struct {
-	ServiceName   string                // 必填；服务级 ID 空间
-	Redis         redis.UniversalClient // 必填；已创建的 go-redis 客户端
-	MinWorkerID   int64                 // 默认 0
-	MaxWorkerID   int64                 // 默认 1023，范围包含两端
-	TTL           time.Duration         // 默认 30 秒
-	RenewInterval time.Duration         // 默认 TTL / 3
-	DisableRenew  bool                  // 默认 false，即自动续租
-	Namespace     string                // 默认 "nodelease"
+	ServiceName   string
+	Redis         redis.UniversalClient
+	Range         *IDRange
+	TTL           time.Duration
+	RenewInterval time.Duration
+	DisableRenew  bool
+	Namespace     string
 }
 ```
 
-配置要求：`ServiceName` 和 `Redis` 不能为空；`0 <= MinWorkerID <= MaxWorkerID`；`TTL > 0`；启用自动续租时 `0 < RenewInterval < TTL`。
+| 字段 | 必填 | 默认值 | 说明 |
+|---|---:|---|---|
+| `ServiceName` | 是 | — | 服务级 ID 空间，最长 256 字节，不能包含控制字符 |
+| `Redis` | 是 | — | 已初始化的 go-redis 客户端 |
+| `Range` | 否 | `[0, 1023]` | 包含两端，最多 65,536 个 ID；使用 `&IDRange{Min: 0, Max: 0}` 表示仅 ID 0 |
+| `TTL` | 否 | `30s` | Redis 租约有效期，最小 `1ms` |
+| `RenewInterval` | 否 | `TTL / 3` | 必须大于 0 且小于 TTL |
+| `DisableRenew` | 否 | `false` | 关闭 Redis 自动续租，但仍会在本地截止时间报告租约到期 |
+| `Namespace` | 否 | `nodelease` | Redis key 前缀，支持字母、数字、`-_.:`，最长 128 字节 |
 
-### `(*Lease).Acquire(ctx) (int64, error)`
+配置不合法时返回可由 `errors.Is(err, nodelease.ErrInvalidConfig)` 判断的错误。
 
-随机申请一个可用 ID。成功后启动自动续租；重复调用返回当前持有的 ID。范围已满时返回 `ErrNoWorkerIDAvailable`。分配必须在 Redis 中原子执行。
+### `(*Lease).Acquire(ctx context.Context) (int64, error)`
 
-### `(*Lease).Renew(ctx) error`
+从范围内的加密随机位置开始逐个尝试，通过 Redis `SET NX PX` 原子申请第一个可用 ID。
 
-手动续租。续租时校验随机租约令牌，只有当前持有者才能延长 TTL。租约已过期或被替换时返回 `ErrLeaseLost`。
+- 同一 `Lease` 在持有期间重复或并发调用会返回相同 ID。
+- 范围已满时返回 `ErrNoWorkerIDAvailable`。
+- Redis 或 context 错误保留原始原因。
+- 申请成功后，`Acquire` 的 context 取消不会终止租约；租约由 `Release`、丢失或 TTL 控制。
 
-### `(*Lease).Release(ctx) error`
+### `(*Lease).Renew(ctx context.Context) error`
 
-停止自动续租并释放 ID。释放时校验令牌，避免旧实例误删新持有者的租约。该方法具备幂等性。
+手动将当前租约延长一个完整 TTL。Lua 脚本会先校验所有权令牌。key 不存在或令牌不匹配时返回 `ErrLeaseLost`。
+
+### `(*Lease).Release(ctx context.Context) error`
+
+停止生命周期 goroutine，并通过令牌校验 Lua 脚本删除 Redis key。该方法可重复调用；旧租约不会删除新持有者的 key。
+
+如果释放命令发生网络错误，本地租约仍会终止，Redis key 最迟在 TTL 到期后回收。
 
 ### `(*Lease).WorkerID() (int64, bool)`
 
-返回当前 ID 和是否持有租约。
+返回当前 ID 和本地是否仍认为租约有效。`ok == false` 后不得继续使用返回过的 ID。
 
 ### `(*Lease).Lost() <-chan error`
 
-返回租约丢失通知通道。续租确认租约过期、所有权变化，或无法在 TTL 到期前确认续租成功时，通过该通道报告 `ErrLeaseLost`。调用方收到通知后必须停止使用旧 ID。
+返回租约丢失通知通道。令牌变化、本地 TTL 到期，或自动续租无法在截止时间前确认成功时，通道最多收到一次包含 `ErrLeaseLost` 的错误。正常 `Release` 不会关闭该通道。
 
-## 范围与隔离
+一个 `Lease` 成功获取后是单次使用的：释放或丢失后，`Acquire` 返回 `ErrLeaseClosed`。需要新 ID 时请调用 `New` 创建新对象。
 
-范围包含两端，例如 `1` 到 `4` 可能返回 `1`、`2`、`3` 或 `4`。相同 `ServiceName` 的实例应使用相同范围。不同服务拥有独立空间，可以安全复用数字：
+## 错误
 
-```text
-order-service   -> worker_id 7
-payment-service -> worker_id 7
+```go
+workerID, err := lease.Acquire(ctx)
+switch {
+case err == nil:
+	log.Printf("worker_id: %d", workerID)
+case errors.Is(err, nodelease.ErrNoWorkerIDAvailable):
+	log.Print("worker_id range is exhausted")
+case errors.Is(err, context.Canceled):
+	log.Print("acquisition canceled")
+default:
+	log.Printf("acquire worker_id: %v", err)
+}
 ```
-
-## 租约语义
-
-每次成功分配都会生成不可预测的令牌：
-
-```text
-申请 ID -> 持有租约 -> 定期续租 -> 主动释放
-                         |
-                         +-> 进程退出或断网 -> TTL 到期 -> ID 可再次分配
-```
-
-自动续租不能消除长时间 GC 暂停、网络分区或 Redis 故障的风险。收到 `ErrLeaseLost` 后，应停止使用旧 `worker_id`，并根据业务策略退出进程或重新申请。
-
-## Redis 键设计
-
-建议每个租约使用一个 key：
-
-```text
-{namespace}:{{serviceName}}:worker:{workerId}
-nodelease:{order-service}:worker:37
-```
-
-花括号是 Redis Cluster 哈希标签。key 的值是随机令牌，TTL 是剩余租约时间。
-
-- 申请：`SET key token NX PX ttl`
-- 续租：Lua 脚本校验 token 后执行 `PEXPIRE`
-- 释放：Lua 脚本校验 token 后执行 `DEL`
-
-续租和释放必须原子执行，不能使用 `GET` 后再单独执行写命令。
-
-## 错误处理
-
-库应提供可由 `errors.Is` 判断的哨兵错误：
 
 - `ErrInvalidConfig`：配置不合法
 - `ErrNoWorkerIDAvailable`：范围内所有 ID 已被占用
-- `ErrLeaseLost`：租约已失效或所有权发生变化
-- Redis 错误保留原始原因，便于 `errors.Is` / `errors.As` 判断
+- `ErrLeaseLost`：租约已过期、所有权变化或无法及时确认续租
+- `ErrLeaseClosed`：单次租约对象已经释放或丢失
 
-## 发布版本
+## Redis key 与原子性
 
-不需要上传到包注册平台，只需创建符合语义化版本的 Git 标签：
+key 格式为：
 
-```bash
-git tag v0.1.0
-git push origin v0.1.0
-go get github.com/jackchendong/nodelease@v0.1.0
+```text
+{namespace}:{base64url(serviceName)}:worker:{workerID}
 ```
 
-稳定 API 通常从 `v1.0.0` 开始。`v2` 及以上需要在模块路径末尾添加主版本，例如 `github.com/jackchendong/nodelease/v2`。
+`order-service` 的 ID `37` 默认对应：
 
-## 运维建议
+```text
+nodelease:{b3JkZXItc2VydmljZQ}:worker:37
+```
 
-- 不同环境使用不同 `Namespace`。
-- `TTL` 应明显大于预期网络抖动、GC 和调度暂停时间。
-- 续租间隔建议不超过 `TTL / 3`。
-- 监控 ID 耗尽、续租失败和租约丢失事件。
-- Redis 数据丢失或故障转移可能导致租约状态回退；严格唯一性场景需同时评估 Redis 持久化和高可用配置。
+花括号形成 Redis Cluster hash tag。同一服务的 key 会进入同一 slot，服务名使用无填充 Base64 URL 编码避免分隔符冲突。
+
+- 申请：`SET key token NX PX ttl`
+- 续租：Lua 原子比较 token 后执行 `PEXPIRE`
+- 释放：Lua 原子比较 token 后执行 `DEL`
+
+库不会使用 `KEYS` 或 `SCAN` 查找可用 ID。
+
+## 保证与限制
+
+- 唯一性建立在目标 Redis 对成功写入的保持能力上。
+- 网络超时可能导致申请结果不确定；这类未续租 key 会在 TTL 后自动回收。
+- Redis 数据丢失、异步复制或故障转移可能使租约状态回退。严格唯一性场景需同时配置合适的 Redis 持久化与高可用策略。
+- 长时间 GC/调度暂停和网络分区可能导致租约丢失。调用方必须监听 `Lost()`，并在丢失后停止使用旧 ID。
+- 相同 `ServiceName` 的所有实例应使用一致的范围、namespace 和租约策略。
+
+## 开发与测试
+
+```bash
+go test ./...
+go test -race ./...
+go vet ./...
+go build ./...
+```
 
 ## License
 
-待定。
+[MIT License](LICENSE)。允许任何人免费使用、复制、修改、合并、发布、分发、再许可和销售本软件，但需保留版权与许可声明。
